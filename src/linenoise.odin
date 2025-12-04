@@ -314,7 +314,7 @@ linenoiseEditStart :: proc(
 	}
 
 	// History add empty string (current buffer)
-	// linenoiseHistoryAdd("") // TODO
+	linenoiseHistoryAdd("")
 
 	if posix.write(posix.FD(l.ofd), raw_data(str_bytes(prompt)), c.size_t(l.plen)) == -1 {
 		return -1
@@ -438,6 +438,46 @@ linenoiseEditBackspace :: proc(l: ^State) {
 	}
 }
 
+HistoryDir :: enum {
+	Next,
+	Prev,
+}
+
+linenoiseEditHistoryNext :: proc(l: ^State, dir: HistoryDir) {
+	if len(history) > 1 {
+		// Update the current history entry before to
+		// overwrite it with the next one.
+		delete(history[len(history) - 1 - l.history_index])
+		history[len(history) - 1 - l.history_index] = strings.clone_from_bytes(l.buf_ptr[:l.len])
+
+		// Show the new entry
+		l.history_index += (dir == .Prev) ? 1 : -1
+		if l.history_index < 0 {
+			l.history_index = 0
+			return
+		} else if l.history_index >= len(history) {
+			l.history_index = len(history) - 1
+			return
+		}
+
+		entry := history[len(history) - 1 - l.history_index]
+		// Copy entry to buf
+		if len(entry) >= l.buflen {
+			// Truncate if too long? Or just copy what fits
+			// linenoise.c uses strncpy which truncates and might not null-terminate if full
+			// We should probably just copy what fits
+			copy(l.buf_ptr[:l.buflen - 1], entry)
+			l.len = l.buflen - 1
+		} else {
+			copy(l.buf_ptr[:len(entry)], entry)
+			l.len = len(entry)
+		}
+		l.buf_ptr[l.len] = 0
+		l.pos = l.len
+		refreshLine(l)
+	}
+}
+
 linenoiseEditFeed :: proc(l: ^State) -> string {
 	if !posix.isatty(posix.FD(l.ifd)) {
 		// TODO: NoTTY handling
@@ -454,8 +494,10 @@ linenoiseEditFeed :: proc(l: ^State) -> string {
 
 	switch c {
 	case ENTER:
-		// history_len--
-		// free history
+		if len(history) > 0 {
+			delete(history[len(history) - 1])
+			ordered_remove(&history, len(history) - 1)
+		}
 		return strings.clone_from_bytes(l.buf_ptr[:l.len])
 	case CTRL_C:
 		return "" // TODO: errno EAGAIN
@@ -465,6 +507,10 @@ linenoiseEditFeed :: proc(l: ^State) -> string {
 		if l.len > 0 {
 			linenoiseEditDelete(l)
 		} else {
+			if len(history) > 0 {
+				delete(history[len(history) - 1])
+				ordered_remove(&history, len(history) - 1)
+			}
 			return "" // EOF
 		}
 	case CTRL_T:
@@ -482,9 +528,9 @@ linenoiseEditFeed :: proc(l: ^State) -> string {
 	case CTRL_F:
 		linenoiseEditMoveRight(l)
 	case CTRL_P:
-	// History prev
+		linenoiseEditHistoryNext(l, .Prev)
 	case CTRL_N:
-	// History next
+		linenoiseEditHistoryNext(l, .Next)
 	case ESC:
 		seq: [3]byte
 		if posix.read(posix.FD(l.ifd), &seq[0], 1) == -1 {return "more"}
@@ -501,8 +547,12 @@ linenoiseEditFeed :: proc(l: ^State) -> string {
 				}
 			} else {
 				switch seq[1] {
-				case 'A': // Up
-				case 'B': // Down
+				case 'A':
+					// Up
+					linenoiseEditHistoryNext(l, .Prev)
+				case 'B':
+					// Down
+					linenoiseEditHistoryNext(l, .Next)
 				case 'C':
 					linenoiseEditMoveRight(l)
 				case 'D':

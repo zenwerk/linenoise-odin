@@ -286,6 +286,14 @@ linenoiseClearScreen :: proc() {
 	}
 }
 
+linenoiseSetHintsCallback :: proc(fn: HintsCallback) {
+	hints_callback = fn
+}
+
+linenoiseSetFreeHintsCallback :: proc(fn: FreeHintsCallback) {
+	free_hints_callback = fn
+}
+
 // Line Editing
 
 linenoiseEditStart :: proc(
@@ -341,6 +349,41 @@ linenoiseEditStop :: proc(l: ^State) {
 	fmt.println()
 }
 
+refreshShowHints :: proc(ab: ^[dynamic]byte, l: ^State, plen: int) {
+	if hints_callback != nil && plen + l.len < l.cols {
+		color: int = -1
+		bold: int = 0
+		buf_str := string(l.buf_ptr[:l.len])
+		hint := hints_callback(buf_str, &color, &bold)
+		if hint != "" {
+			hintlen := len(hint)
+			hintmaxlen := l.cols - (plen + l.len)
+			if hintlen > hintmaxlen {
+				hintlen = hintmaxlen
+			}
+
+			if bold == 1 && color == -1 {
+				color = 37
+			}
+
+			if color != -1 || bold != 0 {
+				seq := fmt.tprintf("\x1b[%d;%d;49m", bold, color)
+				append(ab, ..transmute([]byte)seq)
+			}
+
+			append(ab, ..transmute([]byte)hint[:hintlen])
+
+			if color != -1 || bold != 0 {
+				append(ab, ..transmute([]byte)string("\x1b[0m"))
+			}
+
+			if free_hints_callback != nil {
+				free_hints_callback(hint)
+			}
+		}
+	}
+}
+
 refreshLine :: proc(l: ^State) {
 	// Simple single line refresh for now
 	// TODO: Multi-line support
@@ -359,6 +402,8 @@ refreshLine :: proc(l: ^State) {
 	// We need to construct a slice from buf_ptr and len
 	buf_slice := l.buf_ptr[:l.len]
 	append(&ab, ..buf_slice)
+
+	refreshShowHints(&ab, l, l.plen)
 
 	// Erase to right
 	append(&ab, ..str_bytes("\x1b[0K"))

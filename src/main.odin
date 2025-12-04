@@ -3,8 +3,21 @@ package main
 import "core:fmt"
 import "core:os"
 
+import "core:strings"
+
+example_hints_callback :: proc(buf: string, color: ^int, bold: ^int) -> string {
+	if strings.compare(buf, "hello") == 0 {
+		color^ = 35
+		bold^ = 0
+		return " World"
+	}
+	return ""
+}
+
 main :: proc() {
 	fmt.println("Linenoise Odin Test")
+
+	linenoiseSetHintsCallback(example_hints_callback)
 
 	if len(os.args) > 1 && os.args[1] == "--keycodes" {
 		linenoisePrintKeyCodes()

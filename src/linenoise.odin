@@ -64,6 +64,7 @@ FreeHintsCallback :: proc(hint: string)
 orig_termios: posix.termios
 rawmode: bool
 mlmode: bool
+maskmode: bool
 history_max_len: int = LINENOISE_DEFAULT_HISTORY_MAX_LEN
 history: [dynamic]string
 completion_callback: CompletionCallback
@@ -286,12 +287,37 @@ linenoiseClearScreen :: proc() {
 	}
 }
 
+linenoiseSetCompletionCallback :: proc(fn: CompletionCallback) {
+	completion_callback = fn
+}
+
+linenoiseAddCompletion :: proc(lc: ^Completions, str: string) {
+	append(&lc.cvec, strings.clone(str))
+	lc.len = len(lc.cvec)
+}
+
+freeCompletions :: proc(lc: ^Completions) {
+	for s in lc.cvec {
+		delete(s)
+	}
+	delete(lc.cvec)
+	lc.len = 0
+}
+
 linenoiseSetHintsCallback :: proc(fn: HintsCallback) {
 	hints_callback = fn
 }
 
 linenoiseSetFreeHintsCallback :: proc(fn: FreeHintsCallback) {
 	free_hints_callback = fn
+}
+
+linenoiseMaskModeEnable :: proc() {
+	maskmode = true
+}
+
+linenoiseMaskModeDisable :: proc() {
+	maskmode = false
 }
 
 // Line Editing
@@ -397,11 +423,15 @@ refreshLine :: proc(l: ^State) {
 	// Write prompt and buffer
 	append(&ab, ..transmute([]byte)l.prompt)
 
-	// TODO: maskmode support
 	// Write buffer content
-	// We need to construct a slice from buf_ptr and len
-	buf_slice := l.buf_ptr[:l.len]
-	append(&ab, ..buf_slice)
+	if maskmode {
+		for i := 0; i < l.len; i += 1 {
+			append(&ab, '*')
+		}
+	} else {
+		buf_slice := l.buf_ptr[:l.len]
+		append(&ab, ..buf_slice)
+	}
 
 	refreshShowHints(&ab, l, l.plen)
 
@@ -415,6 +445,99 @@ refreshLine :: proc(l: ^State) {
 	posix.write(posix.FD(l.ofd), raw_data(ab), c.size_t(len(ab)))
 }
 
+refreshLineWithCompletion :: proc(l: ^State, lc: ^Completions) {
+	// Obtain the table of completions if the caller didn't provide one.
+	ctable: Completions
+	lc_ptr := lc
+	if lc_ptr == nil {
+		buf_str := string(l.buf_ptr[:l.len])
+		completion_callback(buf_str, &ctable)
+		lc_ptr = &ctable
+	}
+
+	// Show the edited line with completion if possible, or just refresh.
+	if l.completion_idx < lc_ptr.len {
+		saved_len := l.len
+		saved_pos := l.pos
+		saved_buf_ptr := l.buf_ptr
+
+		l.len = len(lc_ptr.cvec[l.completion_idx])
+		l.pos = l.len
+		l.buf_ptr = raw_data(transmute([]byte)lc_ptr.cvec[l.completion_idx])
+
+		refreshLine(l)
+
+		l.len = saved_len
+		l.pos = saved_pos
+		l.buf_ptr = saved_buf_ptr
+	} else {
+		refreshLine(l)
+	}
+
+	// Free the completions table if needed.
+	if lc_ptr == &ctable {
+		freeCompletions(&ctable)
+	}
+}
+
+completeLine :: proc(l: ^State, keypressed: byte) -> byte {
+	lc: Completions
+	c := keypressed
+
+	buf_str := string(l.buf_ptr[:l.len])
+	completion_callback(buf_str, &lc)
+
+	if lc.len == 0 {
+		linenoiseBeep()
+		l.in_completion = false
+	} else {
+		switch c {
+		case TAB:
+			if !l.in_completion {
+				l.in_completion = true
+				l.completion_idx = 0
+			} else {
+				l.completion_idx = (l.completion_idx + 1) % (lc.len + 1)
+				if l.completion_idx == lc.len {
+					linenoiseBeep()
+				}
+			}
+			c = 0
+		case ESC:
+			// Re-show original buffer
+			if l.completion_idx < lc.len {
+				refreshLine(l)
+			}
+			l.in_completion = false
+			c = 0
+		case:
+			// Update buffer and return
+			if l.completion_idx < lc.len {
+				completion := lc.cvec[l.completion_idx]
+				nwritten := len(completion)
+				// Ensure buffer is large enough
+				if nwritten < l.buflen {
+					copy(l.buf_ptr[:nwritten], completion)
+					l.len = nwritten
+					l.pos = nwritten
+					l.buf_ptr[l.len] = 0
+				}
+			}
+			l.in_completion = false
+		}
+
+		// Show completion or original buffer
+		if l.in_completion && l.completion_idx < lc.len {
+			refreshLineWithCompletion(l, &lc)
+		} else {
+			refreshLine(l)
+		}
+	}
+
+	freeCompletions(&lc)
+	return c
+}
+
 linenoiseEditInsert :: proc(l: ^State, c: byte) -> int {
 	if l.len < l.buflen {
 		if l.len == l.pos {
@@ -423,8 +546,14 @@ linenoiseEditInsert :: proc(l: ^State, c: byte) -> int {
 			l.len += 1
 			l.buf_ptr[l.len] = 0
 
-			// Trivial case optimization could go here
-			refreshLine(l)
+			if !mlmode && l.plen + l.len < l.cols && hints_callback == nil {
+				d := maskmode ? byte('*') : c
+				if posix.write(posix.FD(l.ofd), &d, 1) == -1 {
+					return -1
+				}
+			} else {
+				refreshLine(l)
+			}
 		} else {
 			// memmove
 			for i := l.len; i > l.pos; i -= 1 {
@@ -585,7 +714,15 @@ linenoiseEditFeed :: proc(l: ^State) -> string {
 		return ""
 	}
 
-	// TODO: Completion handling
+	// Completion handling
+	if (l.in_completion || c == TAB) && completion_callback != nil {
+		c = completeLine(l, c)
+		// Return on errors (not implemented in completeLine yet, but c < 0 check in C)
+		// Read next character when 0
+		if c == 0 {
+			return "more"
+		}
+	}
 
 	switch c {
 	case ENTER:

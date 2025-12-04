@@ -14,9 +14,17 @@ example_hints_callback :: proc(buf: string, color: ^int, bold: ^int) -> string {
 	return ""
 }
 
+completion :: proc(buf: string, lc: ^Completions) {
+	if len(buf) > 0 && buf[0] == 'h' {
+		linenoiseAddCompletion(lc, "hello")
+		linenoiseAddCompletion(lc, "hello there")
+	}
+}
+
 main :: proc() {
 	fmt.println("Linenoise Odin Test")
 
+	linenoiseSetCompletionCallback(completion)
 	linenoiseSetHintsCallback(example_hints_callback)
 
 	if len(os.args) > 1 && os.args[1] == "--keycodes" {
@@ -27,6 +35,10 @@ main :: proc() {
 	if len(os.args) > 1 && os.args[1] == "--beep" {
 		linenoiseBeep()
 		return
+	}
+
+	if len(os.args) > 1 && os.args[1] == "--mask" {
+		linenoiseMaskModeEnable()
 	}
 
 	history_file := "history.txt"

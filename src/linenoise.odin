@@ -498,10 +498,30 @@ linenoiseEditHistoryNext :: proc(l: ^State, dir: HistoryDir) {
 	}
 }
 
+linenoiseNoTTY :: proc() -> string {
+	buf: [dynamic]byte
+	for {
+		b: byte
+		n := posix.read(posix.STDIN_FILENO, &b, 1)
+		if n <= 0 { 	// EOF or Error
+			if len(buf) == 0 {
+				delete(buf)
+				return ""
+			} else {
+				break
+			}
+		}
+		if b == '\n' {
+			break
+		}
+		append(&buf, b)
+	}
+	return string(buf[:])
+}
+
 linenoiseEditFeed :: proc(l: ^State) -> string {
 	if !posix.isatty(posix.FD(l.ifd)) {
-		// TODO: NoTTY handling
-		return ""
+		return linenoiseNoTTY()
 	}
 
 	c: byte
@@ -617,6 +637,10 @@ linenoiseEditFeed :: proc(l: ^State) -> string {
 }
 
 linenoise :: proc(prompt: string) -> string {
+	if !posix.isatty(posix.STDIN_FILENO) {
+		return linenoiseNoTTY()
+	}
+
 	buf: [LINENOISE_MAX_LINE]byte
 	state: State
 

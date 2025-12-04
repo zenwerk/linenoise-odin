@@ -621,10 +621,6 @@ linenoiseHistoryAdd :: proc(line: string) -> int {
 		return 0
 	}
 
-	if line == "" {
-		return 0
-	}
-
 	// Don't add duplicated lines
 	if len(history) > 0 && history[len(history) - 1] == line {
 		return 0

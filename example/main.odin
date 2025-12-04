@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:os"
 
+import ln "../"
 import "core:strings"
 
 example_hints_callback :: proc(buf: string, color: ^int, bold: ^int) -> string {
@@ -14,43 +15,43 @@ example_hints_callback :: proc(buf: string, color: ^int, bold: ^int) -> string {
 	return ""
 }
 
-completion :: proc(buf: string, lc: ^Completions) {
+completion :: proc(buf: string, lc: ^ln.Completions) {
 	if len(buf) > 0 && buf[0] == 'h' {
-		linenoiseAddCompletion(lc, "hello")
-		linenoiseAddCompletion(lc, "hello there")
+		ln.linenoiseAddCompletion(lc, "hello")
+		ln.linenoiseAddCompletion(lc, "hello there")
 	}
 }
 
 main :: proc() {
 	fmt.println("Linenoise Odin Test")
 
-	linenoiseSetCompletionCallback(completion)
-	linenoiseSetHintsCallback(example_hints_callback)
+	ln.linenoiseSetCompletionCallback(completion)
+	ln.linenoiseSetHintsCallback(example_hints_callback)
 
 	if len(os.args) > 1 && os.args[1] == "--keycodes" {
-		linenoisePrintKeyCodes()
+		ln.linenoisePrintKeyCodes()
 		return
 	}
 
 	if len(os.args) > 1 && os.args[1] == "--beep" {
-		linenoiseBeep()
+		ln.linenoiseBeep()
 		return
 	}
 
 	if len(os.args) > 1 && os.args[1] == "--mask" {
-		linenoiseMaskModeEnable()
+		ln.linenoiseMaskModeEnable()
 	}
 
 	if len(os.args) > 1 && os.args[1] == "--multiline" {
-		linenoiseSetMultiLine(true)
+		ln.linenoiseSetMultiLine(true)
 		fmt.println("Multi-line mode enabled")
 	}
 
 	history_file := "history.txt"
-	linenoiseHistoryLoad(history_file)
+	ln.linenoiseHistoryLoad(history_file)
 
 	for {
-		line := linenoise("hello> ")
+		line := ln.linenoise("hello> ")
 		if line == "" {
 			break
 		}
@@ -58,8 +59,8 @@ main :: proc() {
 		fmt.printf("echo: '%s'\n", line)
 
 		// Add to history (TODO)
-		linenoiseHistoryAdd(line)
-		linenoiseHistorySave(history_file)
+		ln.linenoiseHistoryAdd(line)
+		ln.linenoiseHistorySave(history_file)
 
 		if line == "exit" || line == "quit" {
 			break

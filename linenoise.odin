@@ -1,10 +1,11 @@
-package main
+package linenoise
 
 import "core:c"
 import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sys/posix"
+import "core:unicode/utf8"
 
 // Constants
 LINENOISE_DEFAULT_HISTORY_MAX_LEN :: 100
@@ -277,6 +278,27 @@ getColumns :: proc(ifd: c.int, ofd: c.int) -> int {
 	}
 }
 
+// Helper to calculate column width of a string
+getStrWidth :: proc(s: string) -> int {
+	width := 0
+	for r in s {
+		// Simple check for wide characters (CJK, etc.)
+		// This is a simplified version. For full support we might need a wcwidth equivalent.
+		// For now, we assume standard wide characters.
+		if r >= 0x1100 {
+			width += 2
+		} else {
+			width += 1
+		}
+	}
+	return width
+}
+
+// Helper to calculate column width of a byte slice up to a certain length
+getByteSliceWidth :: proc(b: []byte) -> int {
+	return getStrWidth(string(b))
+}
+
 linenoiseBeep :: proc() {
 	posix.write(posix.STDERR_FILENO, raw_data(str_bytes("\x07")), 1)
 }
@@ -357,7 +379,7 @@ linenoiseEditStart :: proc(
 	l.buf_ptr = buf
 	l.buflen = buflen
 	l.prompt = prompt
-	l.plen = len(prompt)
+	l.plen = getStrWidth(prompt)
 	l.oldpos = 0
 	l.pos = 0
 	l.len = 0
@@ -396,17 +418,29 @@ linenoiseEditStop :: proc(l: ^State) {
 	fmt.println()
 }
 
-refreshShowHints :: proc(ab: ^abuf, l: ^State, plen: int) {
-	if hints_callback != nil && plen + l.len < l.cols {
+refreshShowHints :: proc(ab: ^abuf, l: ^State, pwidth: int) {
+	bwidth := getByteSliceWidth(l.buf_ptr[:l.len])
+	if hints_callback != nil && pwidth + bwidth < l.cols {
 		color: int = -1
 		bold: int = 0
 		buf_str := string(l.buf_ptr[:l.len])
 		hint := hints_callback(buf_str, &color, &bold)
 		if hint != "" {
-			hintlen := len(hint)
-			hintmaxlen := l.cols - (plen + l.len)
-			if hintlen > hintmaxlen {
-				hintlen = hintmaxlen
+			hintwidth := getStrWidth(hint)
+			hintmaxwidth := l.cols - (pwidth + bwidth)
+
+			print_hint := hint
+			if hintwidth > hintmaxwidth {
+				w := 0
+				end_idx := 0
+				for r in hint {
+					rw := 1
+					if r >= 0x1100 {rw = 2}
+					if w + rw > hintmaxwidth {break}
+					w += rw
+					end_idx += utf8.rune_size(r)
+				}
+				print_hint = hint[:end_idx]
 			}
 
 			if bold == 1 && color == -1 {
@@ -418,7 +452,7 @@ refreshShowHints :: proc(ab: ^abuf, l: ^State, plen: int) {
 				abAppend(ab, seq)
 			}
 
-			abAppend(ab, hint[:hintlen])
+			abAppend(ab, print_hint)
 
 			if color != -1 || bold != 0 {
 				abAppend(ab, "\x1b[0m")
@@ -435,53 +469,102 @@ refreshSingleLine :: proc(l: ^State) {
 	ab: abuf
 	defer abFree(&ab)
 
-	plen := l.plen
-	pos := l.pos
-	curr_len := l.len
-	buf_idx := 0
+	pwidth := getStrWidth(l.prompt)
+	cwidth := getByteSliceWidth(l.buf_ptr[:l.pos])
+	// bwidth := getByteSliceWidth(l.buf_ptr[:l.len]) // Not strictly needed if we iterate
 
-	for (plen + pos) >= l.cols {
-		buf_idx += 1
-		curr_len -= 1
-		pos -= 1
+	buf_slice := l.buf_ptr[:l.len]
+
+	// Calculate scrolling
+	buf_idx := 0
+	current_skip_width := 0
+	target_skip_width := pwidth + cwidth - l.cols + 1
+
+	if target_skip_width > 0 {
+		offset := 0
+		for offset < l.len {
+			if current_skip_width >= target_skip_width {
+				break
+			}
+
+			b := buf_slice[offset]
+			rune_len := 1
+			if b & 0xE0 ==
+			   0xC0 {rune_len = 2} else if b & 0xF0 == 0xE0 {rune_len = 3} else if b & 0xF8 == 0xF0 {rune_len = 4}
+
+			w := 1
+			if rune_len > 1 {
+				r, _ := utf8.decode_rune(buf_slice[offset:min(offset + rune_len, l.len)])
+				if r >= 0x1100 {w = 2}
+			}
+
+			current_skip_width += w
+			offset += rune_len
+		}
+		buf_idx = offset
 	}
 
-	for (plen + curr_len) > l.cols {
-		curr_len -= 1
+	// Calculate end_byte
+	end_byte := buf_idx
+	current_print_width := 0
+	max_print_width := l.cols - pwidth
+
+	for end_byte < l.len {
+		b := buf_slice[end_byte]
+		rune_len := 1
+		if b & 0xE0 ==
+		   0xC0 {rune_len = 2} else if b & 0xF0 == 0xE0 {rune_len = 3} else if b & 0xF8 == 0xF0 {rune_len = 4}
+
+		w := 1
+		if rune_len > 1 {
+			r, _ := utf8.decode_rune(buf_slice[end_byte:min(end_byte + rune_len, l.len)])
+			if r >= 0x1100 {w = 2}
+		}
+
+		if current_print_width + w > max_print_width {
+			break
+		}
+
+		current_print_width += w
+		end_byte += rune_len
 	}
 
 	// Cursor to left edge
 	abAppend(&ab, "\r")
 
-	// Write prompt and buffer
+	// Write prompt
 	abAppend(&ab, l.prompt)
 
 	// Write buffer content
 	if maskmode {
-		for i := 0; i < curr_len; i += 1 {
+		for i := 0; i < current_print_width; i += 1 {
 			abAppend(&ab, "*")
 		}
 	} else {
-		buf_slice := l.buf_ptr[buf_idx:buf_idx + curr_len]
-		abAppendBytes(&ab, buf_slice)
+		abAppendBytes(&ab, buf_slice[buf_idx:end_byte])
 	}
 
-	refreshShowHints(&ab, l, plen)
+	refreshShowHints(&ab, l, pwidth)
 
 	// Erase to right
 	abAppend(&ab, "\x1b[0K")
 
 	// Move cursor to original position
-	cursor_seq := fmt.tprintf("\r\x1b[%dC", pos + plen)
+	// Cursor pos is pwidth + (cwidth - current_skip_width)
+	cursor_visual_pos := pwidth + cwidth - current_skip_width
+	cursor_seq := fmt.tprintf("\r\x1b[%dC", cursor_visual_pos)
 	abAppend(&ab, cursor_seq)
 
 	posix.write(posix.FD(l.ofd), raw_data(ab.b), c.size_t(len(ab.b)))
 }
 
 refreshMultiLine :: proc(l: ^State) {
-	plen := len(l.prompt)
-	rows := (plen + l.len + l.cols - 1) / l.cols
-	rpos := (plen + l.oldpos + l.cols) / l.cols
+	pwidth := getStrWidth(l.prompt)
+	cwidth := getByteSliceWidth(l.buf_ptr[:l.pos])
+	bwidth := getByteSliceWidth(l.buf_ptr[:l.len])
+
+	rows := (pwidth + bwidth + l.cols - 1) / l.cols
+	rpos := (pwidth + l.oldpos + l.cols) / l.cols // l.oldpos is now old_cwidth
 	old_rows := l.oldrows
 
 	l.oldrows = rows
@@ -505,8 +588,21 @@ refreshMultiLine :: proc(l: ^State) {
 	// Write the prompt and the current buffer content
 	abAppend(&ab, l.prompt)
 	if maskmode {
-		for i := 0; i < l.len; i += 1 {
+		// This is tricky for multiline maskmode with variable width...
+		// But maskmode usually implies * which is width 1.
+		// So we can just print * for each rune?
+		// Or just print * for bwidth?
+		// Let's print * for each rune.
+		buf_slice := l.buf_ptr[:l.len]
+		offset := 0
+		for offset < l.len {
 			abAppend(&ab, "*")
+			// advance offset
+			b := buf_slice[offset]
+			rune_len := 1
+			if b & 0xE0 ==
+			   0xC0 {rune_len = 2} else if b & 0xF0 == 0xE0 {rune_len = 3} else if b & 0xF8 == 0xF0 {rune_len = 4}
+			offset += rune_len
 		}
 	} else {
 		buf_slice := l.buf_ptr[:l.len]
@@ -514,11 +610,11 @@ refreshMultiLine :: proc(l: ^State) {
 	}
 
 	// Show hints
-	refreshShowHints(&ab, l, plen)
+	refreshShowHints(&ab, l, pwidth)
 
 	// If we are at the very end of the screen with our prompt, we need to
 	// emit a newline and move the prompt to the first column.
-	if l.pos > 0 && l.pos == l.len && (l.pos + plen) % l.cols == 0 {
+	if cwidth > 0 && cwidth == bwidth && (cwidth + pwidth) % l.cols == 0 {
 		abAppend(&ab, "\n\r")
 		rows += 1
 		if rows > l.oldrows {
@@ -527,14 +623,14 @@ refreshMultiLine :: proc(l: ^State) {
 	}
 
 	// Move cursor to right position
-	rpos2 := (plen + l.pos + l.cols) / l.cols
+	rpos2 := (pwidth + cwidth + l.cols) / l.cols
 
 	if rows - rpos2 > 0 {
 		seq := fmt.tprintf("\x1b[%dA", rows - rpos2)
 		abAppend(&ab, seq)
 	}
 
-	col := (plen + l.pos) % l.cols
+	col := (pwidth + cwidth) % l.cols
 	if col > 0 {
 		seq := fmt.tprintf("\r\x1b[%dC", col)
 		abAppend(&ab, seq)
@@ -542,7 +638,7 @@ refreshMultiLine :: proc(l: ^State) {
 		abAppend(&ab, "\r")
 	}
 
-	l.oldpos = l.pos
+	l.oldpos = cwidth // Store visual position for next time
 
 	posix.write(posix.FD(l.ofd), raw_data(ab.b), c.size_t(len(ab.b)))
 }
@@ -590,7 +686,7 @@ refreshLineWithCompletion :: proc(l: ^State, lc: ^Completions) {
 	}
 }
 
-completeLine :: proc(l: ^State, keypressed: byte) -> byte {
+completeLine :: proc(l: ^State, keypressed: rune) -> rune {
 	lc: Completions
 	c := keypressed
 
@@ -648,30 +744,40 @@ completeLine :: proc(l: ^State, keypressed: byte) -> byte {
 	return c
 }
 
-linenoiseEditInsert :: proc(l: ^State, c: byte) -> int {
-	if l.len < l.buflen {
+linenoiseEditInsert :: proc(l: ^State, r: rune) -> int {
+	// Encode rune to bytes
+	b, n := utf8.encode_rune(r)
+	slice := b[:n]
+
+	if l.len + n <= l.buflen {
 		if l.len == l.pos {
-			l.buf_ptr[l.pos] = c
-			l.pos += 1
-			l.len += 1
+			// Append
+			copy(l.buf_ptr[l.pos:l.buflen], slice)
+			l.pos += n
+			l.len += n
 			l.buf_ptr[l.len] = 0
 
-			if !mlmode && l.plen + l.len < l.cols && hints_callback == nil {
-				d := maskmode ? byte('*') : c
-				if posix.write(posix.FD(l.ofd), &d, 1) == -1 {
-					return -1
+			// Optimization for appending at end
+			if !mlmode &&
+			   l.plen + getByteSliceWidth(l.buf_ptr[:l.len]) < l.cols &&
+			   hints_callback == nil {
+				if maskmode {
+					posix.write(posix.FD(l.ofd), raw_data(str_bytes("*")), 1)
+				} else {
+					posix.write(posix.FD(l.ofd), raw_data(slice), c.size_t(n))
 				}
 			} else {
 				refreshLine(l)
 			}
 		} else {
+			// Insert in middle
 			// memmove
-			for i := l.len; i > l.pos; i -= 1 {
-				l.buf_ptr[i] = l.buf_ptr[i - 1]
+			for i := l.len; i >= l.pos; i -= 1 {
+				l.buf_ptr[i + n] = l.buf_ptr[i]
 			}
-			l.buf_ptr[l.pos] = c
-			l.len += 1
-			l.pos += 1
+			copy(l.buf_ptr[l.pos:l.buflen], slice)
+			l.len += n
+			l.pos += n
 			l.buf_ptr[l.len] = 0
 			refreshLine(l)
 		}
@@ -681,14 +787,22 @@ linenoiseEditInsert :: proc(l: ^State, c: byte) -> int {
 
 linenoiseEditMoveLeft :: proc(l: ^State) {
 	if l.pos > 0 {
-		l.pos -= 1
+		prev_pos := l.pos - 1
+		for prev_pos > 0 && (l.buf_ptr[prev_pos] & 0xC0) == 0x80 {
+			prev_pos -= 1
+		}
+		l.pos = prev_pos
 		refreshLine(l)
 	}
 }
 
 linenoiseEditMoveRight :: proc(l: ^State) {
 	if l.pos != l.len {
-		l.pos += 1
+		next_pos := l.pos + 1
+		for next_pos < l.len && (l.buf_ptr[next_pos] & 0xC0) == 0x80 {
+			next_pos += 1
+		}
+		l.pos = next_pos
 		refreshLine(l)
 	}
 }
@@ -709,25 +823,35 @@ linenoiseEditMoveEnd :: proc(l: ^State) {
 
 linenoiseEditDelete :: proc(l: ^State) {
 	if l.len > 0 && l.pos < l.len {
-		// memmove
-		for i := l.pos; i < l.len - 1; i += 1 {
-			l.buf_ptr[i] = l.buf_ptr[i + 1]
+		next_pos := l.pos + 1
+		for next_pos < l.len && (l.buf_ptr[next_pos] & 0xC0) == 0x80 {
+			next_pos += 1
 		}
-		l.len -= 1
-		l.buf_ptr[l.len] = 0
+		diff := next_pos - l.pos
+
+		// memmove
+		for i := l.pos; i <= l.len - diff; i += 1 {
+			l.buf_ptr[i] = l.buf_ptr[i + diff]
+		}
+		l.len -= diff
 		refreshLine(l)
 	}
 }
 
 linenoiseEditBackspace :: proc(l: ^State) {
 	if l.pos > 0 && l.len > 0 {
-		// memmove
-		for i := l.pos - 1; i < l.len - 1; i += 1 {
-			l.buf_ptr[i] = l.buf_ptr[i + 1]
+		prev_pos := l.pos - 1
+		for prev_pos > 0 && (l.buf_ptr[prev_pos] & 0xC0) == 0x80 {
+			prev_pos -= 1
 		}
-		l.pos -= 1
-		l.len -= 1
-		l.buf_ptr[l.len] = 0
+		diff := l.pos - prev_pos
+
+		// memmove
+		for i := 0; i <= l.len - l.pos; i += 1 {
+			l.buf_ptr[prev_pos + i] = l.buf_ptr[l.pos + i]
+		}
+		l.pos -= diff
+		l.len -= diff
 		refreshLine(l)
 	}
 }
@@ -735,11 +859,28 @@ linenoiseEditBackspace :: proc(l: ^State) {
 linenoiseEditDeletePrevWord :: proc(l: ^State) {
 	old_pos := l.pos
 
-	for l.pos > 0 && l.buf_ptr[l.pos - 1] == ' ' {
-		l.pos -= 1
+	for l.pos > 0 {
+		prev_pos := l.pos - 1
+		for prev_pos > 0 && (l.buf_ptr[prev_pos] & 0xC0) == 0x80 {
+			prev_pos -= 1
+		}
+		if l.buf_ptr[prev_pos] == ' ' {
+			l.pos = prev_pos
+		} else {
+			break
+		}
 	}
-	for l.pos > 0 && l.buf_ptr[l.pos - 1] != ' ' {
-		l.pos -= 1
+
+	for l.pos > 0 {
+		prev_pos := l.pos - 1
+		for prev_pos > 0 && (l.buf_ptr[prev_pos] & 0xC0) == 0x80 {
+			prev_pos -= 1
+		}
+		if l.buf_ptr[prev_pos] != ' ' {
+			l.pos = prev_pos
+		} else {
+			break
+		}
 	}
 
 	diff := old_pos - l.pos
@@ -818,23 +959,50 @@ linenoiseEditFeed :: proc(l: ^State) -> string {
 		return linenoiseNoTTY()
 	}
 
-	c: byte
-	nread := posix.read(posix.FD(l.ifd), &c, 1)
+	b: byte
+	nread := posix.read(posix.FD(l.ifd), &b, 1)
 	if nread <= 0 {
 		return ""
 	}
 
-	// Completion handling
-	if (l.in_completion || c == TAB) && completion_callback != nil {
-		c = completeLine(l, c)
-		// Return on errors (not implemented in completeLine yet, but c < 0 check in C)
-		// Read next character when 0
-		if c == 0 {
-			return "more"
+	// Read UTF-8 sequence
+	r: rune
+	if b < 0x80 {
+		r = rune(b)
+	} else {
+		len_needed := 0
+		if b & 0xE0 ==
+		   0xC0 {len_needed = 1} else if b & 0xF0 == 0xE0 {len_needed = 2} else if b & 0xF8 == 0xF0 {len_needed = 3}
+
+		if len_needed > 0 {
+			seq: [4]byte
+			seq[0] = b
+			n := posix.read(posix.FD(l.ifd), &seq[1], c.size_t(len_needed))
+			if n == int(len_needed) {
+				r_val, _ := utf8.decode_rune(seq[:1 + len_needed])
+				r = r_val
+			} else {
+				r = rune(b)
+			}
+		} else {
+			r = rune(b)
 		}
 	}
 
-	switch c {
+	// Completion handling
+	if (l.in_completion || b == TAB) && completion_callback != nil {
+		r = completeLine(l, r)
+		if r == 0 {
+			return "more"
+		}
+		if r < 0x80 {
+			b = byte(r)
+		} else {
+			b = 0 // Force default
+		}
+	}
+
+	switch b {
 	case ENTER:
 		if len(history) > 0 {
 			delete(history[len(history) - 1])
@@ -932,7 +1100,7 @@ linenoiseEditFeed :: proc(l: ^State) -> string {
 	case CTRL_W:
 		linenoiseEditDeletePrevWord(l)
 	case:
-		linenoiseEditInsert(l, c)
+		linenoiseEditInsert(l, r)
 	}
 
 	return "more" // Special value to indicate more editing needed

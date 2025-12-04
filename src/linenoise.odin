@@ -280,6 +280,12 @@ linenoiseBeep :: proc() {
 	posix.write(posix.STDERR_FILENO, raw_data(str_bytes("\x07")), 1)
 }
 
+linenoiseClearScreen :: proc() {
+	if posix.write(posix.STDOUT_FILENO, raw_data(str_bytes("\x1b[H\x1b[2J")), 7) <= 0 {
+		// nothing to do on error
+	}
+}
+
 // Line Editing
 
 linenoiseEditStart :: proc(
@@ -629,7 +635,7 @@ linenoiseEditFeed :: proc(l: ^State) -> string {
 	case CTRL_E:
 		linenoiseEditMoveEnd(l)
 	case CTRL_L:
-		// clear screen
+		linenoiseClearScreen()
 		refreshLine(l)
 	case CTRL_W:
 		linenoiseEditDeletePrevWord(l)

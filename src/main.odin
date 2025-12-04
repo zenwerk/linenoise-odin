@@ -11,6 +11,11 @@ main :: proc() {
 		return
 	}
 
+	if len(os.args) > 1 && os.args[1] == "--beep" {
+		linenoiseBeep()
+		return
+	}
+
 	history_file := "history.txt"
 	linenoiseHistoryLoad(history_file)
 

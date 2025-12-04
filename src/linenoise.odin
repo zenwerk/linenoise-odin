@@ -276,6 +276,10 @@ getColumns :: proc(ifd: c.int, ofd: c.int) -> int {
 	}
 }
 
+linenoiseBeep :: proc() {
+	posix.write(posix.STDERR_FILENO, raw_data(str_bytes("\x07")), 1)
+}
+
 // Line Editing
 
 linenoiseEditStart :: proc(

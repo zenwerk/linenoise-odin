@@ -41,6 +41,11 @@ main :: proc() {
 		linenoiseMaskModeEnable()
 	}
 
+	if len(os.args) > 1 && os.args[1] == "--multiline" {
+		linenoiseSetMultiLine(true)
+		fmt.println("Multi-line mode enabled")
+	}
+
 	history_file := "history.txt"
 	linenoiseHistoryLoad(history_file)
 

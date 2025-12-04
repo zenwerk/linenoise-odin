@@ -320,6 +320,27 @@ linenoiseMaskModeDisable :: proc() {
 	maskmode = false
 }
 
+linenoiseSetMultiLine :: proc(ml: bool) {
+	mlmode = ml
+}
+
+// Append Buffer
+abuf :: struct {
+	b: [dynamic]byte,
+}
+
+abAppend :: proc(ab: ^abuf, s: string) {
+	append(&ab.b, ..transmute([]byte)s)
+}
+
+abAppendBytes :: proc(ab: ^abuf, b: []byte) {
+	append(&ab.b, ..b)
+}
+
+abFree :: proc(ab: ^abuf) {
+	delete(ab.b)
+}
+
 // Line Editing
 
 linenoiseEditStart :: proc(
@@ -375,7 +396,7 @@ linenoiseEditStop :: proc(l: ^State) {
 	fmt.println()
 }
 
-refreshShowHints :: proc(ab: ^[dynamic]byte, l: ^State, plen: int) {
+refreshShowHints :: proc(ab: ^abuf, l: ^State, plen: int) {
 	if hints_callback != nil && plen + l.len < l.cols {
 		color: int = -1
 		bold: int = 0
@@ -394,13 +415,13 @@ refreshShowHints :: proc(ab: ^[dynamic]byte, l: ^State, plen: int) {
 
 			if color != -1 || bold != 0 {
 				seq := fmt.tprintf("\x1b[%d;%d;49m", bold, color)
-				append(ab, ..transmute([]byte)seq)
+				abAppend(ab, seq)
 			}
 
-			append(ab, ..transmute([]byte)hint[:hintlen])
+			abAppend(ab, hint[:hintlen])
 
 			if color != -1 || bold != 0 {
-				append(ab, ..transmute([]byte)string("\x1b[0m"))
+				abAppend(ab, "\x1b[0m")
 			}
 
 			if free_hints_callback != nil {
@@ -410,39 +431,128 @@ refreshShowHints :: proc(ab: ^[dynamic]byte, l: ^State, plen: int) {
 	}
 }
 
-refreshLine :: proc(l: ^State) {
-	// Simple single line refresh for now
-	// TODO: Multi-line support
+refreshSingleLine :: proc(l: ^State) {
+	ab: abuf
+	defer abFree(&ab)
 
-	ab: [dynamic]byte
-	defer delete(ab)
+	plen := l.plen
+	pos := l.pos
+	curr_len := l.len
+	buf_idx := 0
+
+	for (plen + pos) >= l.cols {
+		buf_idx += 1
+		curr_len -= 1
+		pos -= 1
+	}
+
+	for (plen + curr_len) > l.cols {
+		curr_len -= 1
+	}
 
 	// Cursor to left edge
-	append(&ab, '\r')
+	abAppend(&ab, "\r")
 
 	// Write prompt and buffer
-	append(&ab, ..transmute([]byte)l.prompt)
+	abAppend(&ab, l.prompt)
 
 	// Write buffer content
 	if maskmode {
+		for i := 0; i < curr_len; i += 1 {
+			abAppend(&ab, "*")
+		}
+	} else {
+		buf_slice := l.buf_ptr[buf_idx:buf_idx + curr_len]
+		abAppendBytes(&ab, buf_slice)
+	}
+
+	refreshShowHints(&ab, l, plen)
+
+	// Erase to right
+	abAppend(&ab, "\x1b[0K")
+
+	// Move cursor to original position
+	cursor_seq := fmt.tprintf("\r\x1b[%dC", pos + plen)
+	abAppend(&ab, cursor_seq)
+
+	posix.write(posix.FD(l.ofd), raw_data(ab.b), c.size_t(len(ab.b)))
+}
+
+refreshMultiLine :: proc(l: ^State) {
+	plen := len(l.prompt)
+	rows := (plen + l.len + l.cols - 1) / l.cols
+	rpos := (plen + l.oldpos + l.cols) / l.cols
+	old_rows := l.oldrows
+
+	l.oldrows = rows
+
+	ab: abuf
+	defer abFree(&ab)
+
+	// First step: clear all the lines used before.
+	if old_rows - rpos > 0 {
+		seq := fmt.tprintf("\x1b[%dB", old_rows - rpos)
+		abAppend(&ab, seq)
+	}
+
+	for j := 0; j < old_rows - 1; j += 1 {
+		abAppend(&ab, "\r\x1b[0K\x1b[1A")
+	}
+
+	// Clean the top line
+	abAppend(&ab, "\r\x1b[0K")
+
+	// Write the prompt and the current buffer content
+	abAppend(&ab, l.prompt)
+	if maskmode {
 		for i := 0; i < l.len; i += 1 {
-			append(&ab, '*')
+			abAppend(&ab, "*")
 		}
 	} else {
 		buf_slice := l.buf_ptr[:l.len]
-		append(&ab, ..buf_slice)
+		abAppendBytes(&ab, buf_slice)
 	}
 
-	refreshShowHints(&ab, l, l.plen)
+	// Show hints
+	refreshShowHints(&ab, l, plen)
 
-	// Erase to right
-	append(&ab, ..str_bytes("\x1b[0K"))
+	// If we are at the very end of the screen with our prompt, we need to
+	// emit a newline and move the prompt to the first column.
+	if l.pos > 0 && l.pos == l.len && (l.pos + plen) % l.cols == 0 {
+		abAppend(&ab, "\n\r")
+		rows += 1
+		if rows > l.oldrows {
+			l.oldrows = rows
+		}
+	}
 
-	// Move cursor to original position
-	cursor_seq := fmt.tprintf("\r\x1b[%dC", l.pos + l.plen)
-	append(&ab, ..transmute([]byte)cursor_seq)
+	// Move cursor to right position
+	rpos2 := (plen + l.pos + l.cols) / l.cols
 
-	posix.write(posix.FD(l.ofd), raw_data(ab), c.size_t(len(ab)))
+	if rows - rpos2 > 0 {
+		seq := fmt.tprintf("\x1b[%dA", rows - rpos2)
+		abAppend(&ab, seq)
+	}
+
+	col := (plen + l.pos) % l.cols
+	if col > 0 {
+		seq := fmt.tprintf("\r\x1b[%dC", col)
+		abAppend(&ab, seq)
+	} else {
+		abAppend(&ab, "\r")
+	}
+
+	l.oldpos = l.pos
+
+	posix.write(posix.FD(l.ofd), raw_data(ab.b), c.size_t(len(ab.b)))
+}
+
+refreshLine :: proc(l: ^State) {
+	if mlmode {
+		refreshMultiLine(l)
+	} else {
+		refreshSingleLine(l)
+	}
 }
 
 refreshLineWithCompletion :: proc(l: ^State, lc: ^Completions) {

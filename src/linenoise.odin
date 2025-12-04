@@ -438,6 +438,26 @@ linenoiseEditBackspace :: proc(l: ^State) {
 	}
 }
 
+linenoiseEditDeletePrevWord :: proc(l: ^State) {
+	old_pos := l.pos
+
+	for l.pos > 0 && l.buf_ptr[l.pos - 1] == ' ' {
+		l.pos -= 1
+	}
+	for l.pos > 0 && l.buf_ptr[l.pos - 1] != ' ' {
+		l.pos -= 1
+	}
+
+	diff := old_pos - l.pos
+	// memmove
+	count := l.len - old_pos + 1
+	for i := 0; i < count; i += 1 {
+		l.buf_ptr[l.pos + i] = l.buf_ptr[old_pos + i]
+	}
+	l.len -= diff
+	refreshLine(l)
+}
+
 HistoryDir :: enum {
 	Next,
 	Prev,
@@ -588,7 +608,7 @@ linenoiseEditFeed :: proc(l: ^State) -> string {
 		// clear screen
 		refreshLine(l)
 	case CTRL_W:
-	// delete prev word
+		linenoiseEditDeletePrevWord(l)
 	case:
 		linenoiseEditInsert(l, c)
 	}

@@ -731,3 +731,36 @@ linenoiseHistoryLoad :: proc(filename: string) -> int {
 	}
 	return 0
 }
+
+linenoisePrintKeyCodes :: proc() {
+	quit: [4]byte = {' ', ' ', ' ', ' '}
+
+	fmt.println("Linenoise key codes debugging mode.")
+	fmt.println("Press keys to see scan codes. Type 'quit' at any time to exit.")
+
+	if enableRawMode(c.int(posix.STDIN_FILENO)) != .None {
+		return
+	}
+	defer disableRawMode(c.int(posix.STDIN_FILENO))
+
+	for {
+		c_in: byte
+		nread := posix.read(posix.STDIN_FILENO, &c_in, 1)
+		if nread <= 0 {
+			continue
+		}
+
+		// Shift quit buffer
+		copy(quit[:3], quit[1:])
+		quit[3] = c_in
+
+		if string(quit[:]) == "quit" {
+			break
+		}
+
+		is_print := c_in >= 32 && c_in <= 126
+		display_char := is_print ? rune(c_in) : '?'
+
+		fmt.printf("'%c' %02x (%d) (type quit to exit)\n\r", display_char, c_in, c_in)
+	}
+}

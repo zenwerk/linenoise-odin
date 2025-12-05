@@ -938,12 +938,12 @@ linenoiseEditHistoryNext :: proc(l: ^State, dir: HistoryDir) {
 
 linenoiseNoTTY :: proc() -> (string, Error) {
 	buf: [dynamic]byte
+	defer delete(buf)
 	for {
 		b: byte
 		n := posix.read(posix.STDIN_FILENO, &b, 1)
 		if n <= 0 { 	// EOF or Error
 			if len(buf) == 0 {
-				delete(buf)
 				return "", .None
 			} else {
 				break
@@ -954,7 +954,11 @@ linenoiseNoTTY :: proc() -> (string, Error) {
 		}
 		append(&buf, b)
 	}
-	return string(buf[:]), .None
+	result, alloc_err := strings.clone_from_bytes(buf[:])
+	if alloc_err != nil {
+		return "", .ReadError
+	}
+	return result, .None
 }
 
 linenoiseEditFeed :: proc(l: ^State) -> (string, Error) {

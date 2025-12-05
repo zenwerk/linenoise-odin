@@ -15,13 +15,15 @@ main :: proc() {
     history_file := "history.txt"
     ln.linenoiseHistoryLoad(history_file)
 
+    buf: [ln.LINENOISE_MAX_LINE]byte
     for {
         // Get input
-        line := ln.linenoise("hello> ")
-        if line == "" {
+        n, err := ln.linenoise("hello> ", buf[:])
+        if n == 0 || err != .None {
             break
         }
 
+        line := string(buf[:n])
         fmt.printf("echo: '%s'\n", line)
 
         // Add to history and save
@@ -31,9 +33,6 @@ main :: proc() {
         if line == "exit" {
             break
         }
-        
-        // Free memory
-        delete(line)
     }
 }
 ```

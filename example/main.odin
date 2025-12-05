@@ -51,7 +51,7 @@ main :: proc() {
 	ln.linenoiseHistoryLoad(history_file)
 
 	for {
-		line := ln.linenoise("hello> ")
+		line, _ := ln.linenoise("hello> ")
 		if line == "" {
 			break
 		}

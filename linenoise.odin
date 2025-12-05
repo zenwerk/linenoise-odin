@@ -79,6 +79,7 @@ Error :: enum {
 	WriteError,
 	UnsupportedTerm,
 	RawModeError,
+	CtrlC,
 }
 
 // Missing POSIX/System definitions for macOS
@@ -159,9 +160,7 @@ enableRawMode :: proc(fd: c.int) -> Error {
 }
 
 disableRawMode :: proc(fd: c.int) {
-	if rawmode &&
-	   posix.tcsetattr(posix.FD(fd), posix.TC_Optional_Action(TCSAFLUSH), &orig_termios) !=
-		   posix.result(-1) {
+	if rawmode && posix.tcsetattr(posix.FD(fd), posix.TC_Optional_Action(TCSAFLUSH), &orig_termios) != posix.result(-1) {
 		rawmode = false
 	}
 }
@@ -365,14 +364,7 @@ abFree :: proc(ab: ^abuf) {
 
 // Line Editing
 
-linenoiseEditStart :: proc(
-	l: ^State,
-	stdin_fd: c.int,
-	stdout_fd: c.int,
-	buf: [^]byte,
-	buflen: int,
-	prompt: string,
-) -> int {
+linenoiseEditStart :: proc(l: ^State, stdin_fd: c.int, stdout_fd: c.int, buf: [^]byte, buflen: int, prompt: string) -> int {
 	l.in_completion = false
 	l.ifd = stdin_fd != -1 ? stdin_fd : c.int(posix.STDIN_FILENO)
 	l.ofd = stdout_fd != -1 ? stdout_fd : c.int(posix.STDOUT_FILENO)
@@ -489,8 +481,7 @@ refreshSingleLine :: proc(l: ^State) {
 
 			b := buf_slice[offset]
 			rune_len := 1
-			if b & 0xE0 ==
-			   0xC0 {rune_len = 2} else if b & 0xF0 == 0xE0 {rune_len = 3} else if b & 0xF8 == 0xF0 {rune_len = 4}
+			if b & 0xE0 == 0xC0 {rune_len = 2} else if b & 0xF0 == 0xE0 {rune_len = 3} else if b & 0xF8 == 0xF0 {rune_len = 4}
 
 			w := 1
 			if rune_len > 1 {
@@ -512,8 +503,7 @@ refreshSingleLine :: proc(l: ^State) {
 	for end_byte < l.len {
 		b := buf_slice[end_byte]
 		rune_len := 1
-		if b & 0xE0 ==
-		   0xC0 {rune_len = 2} else if b & 0xF0 == 0xE0 {rune_len = 3} else if b & 0xF8 == 0xF0 {rune_len = 4}
+		if b & 0xE0 == 0xC0 {rune_len = 2} else if b & 0xF0 == 0xE0 {rune_len = 3} else if b & 0xF8 == 0xF0 {rune_len = 4}
 
 		w := 1
 		if rune_len > 1 {
@@ -600,8 +590,7 @@ refreshMultiLine :: proc(l: ^State) {
 			// advance offset
 			b := buf_slice[offset]
 			rune_len := 1
-			if b & 0xE0 ==
-			   0xC0 {rune_len = 2} else if b & 0xF0 == 0xE0 {rune_len = 3} else if b & 0xF8 == 0xF0 {rune_len = 4}
+			if b & 0xE0 == 0xC0 {rune_len = 2} else if b & 0xF0 == 0xE0 {rune_len = 3} else if b & 0xF8 == 0xF0 {rune_len = 4}
 			offset += rune_len
 		}
 	} else {
@@ -758,9 +747,7 @@ linenoiseEditInsert :: proc(l: ^State, r: rune) -> int {
 			l.buf_ptr[l.len] = 0
 
 			// Optimization for appending at end
-			if !mlmode &&
-			   l.plen + getByteSliceWidth(l.buf_ptr[:l.len]) < l.cols &&
-			   hints_callback == nil {
+			if !mlmode && l.plen + getByteSliceWidth(l.buf_ptr[:l.len]) < l.cols && hints_callback == nil {
 				if maskmode {
 					posix.write(posix.FD(l.ofd), raw_data(str_bytes("*")), 1)
 				} else {
@@ -933,7 +920,7 @@ linenoiseEditHistoryNext :: proc(l: ^State, dir: HistoryDir) {
 	}
 }
 
-linenoiseNoTTY :: proc() -> string {
+linenoiseNoTTY :: proc() -> (string, Error) {
 	buf: [dynamic]byte
 	for {
 		b: byte
@@ -941,7 +928,7 @@ linenoiseNoTTY :: proc() -> string {
 		if n <= 0 { 	// EOF or Error
 			if len(buf) == 0 {
 				delete(buf)
-				return ""
+				return "", .None
 			} else {
 				break
 			}
@@ -951,10 +938,10 @@ linenoiseNoTTY :: proc() -> string {
 		}
 		append(&buf, b)
 	}
-	return string(buf[:])
+	return string(buf[:]), .None
 }
 
-linenoiseEditFeed :: proc(l: ^State) -> string {
+linenoiseEditFeed :: proc(l: ^State) -> (string, Error) {
 	if !posix.isatty(posix.FD(l.ifd)) {
 		return linenoiseNoTTY()
 	}
@@ -962,7 +949,7 @@ linenoiseEditFeed :: proc(l: ^State) -> string {
 	b: byte
 	nread := posix.read(posix.FD(l.ifd), &b, 1)
 	if nread <= 0 {
-		return ""
+		return "", .None
 	}
 
 	// Read UTF-8 sequence
@@ -971,8 +958,7 @@ linenoiseEditFeed :: proc(l: ^State) -> string {
 		r = rune(b)
 	} else {
 		len_needed := 0
-		if b & 0xE0 ==
-		   0xC0 {len_needed = 1} else if b & 0xF0 == 0xE0 {len_needed = 2} else if b & 0xF8 == 0xF0 {len_needed = 3}
+		if b & 0xE0 == 0xC0 {len_needed = 1} else if b & 0xF0 == 0xE0 {len_needed = 2} else if b & 0xF8 == 0xF0 {len_needed = 3}
 
 		if len_needed > 0 {
 			seq: [4]byte
@@ -993,7 +979,7 @@ linenoiseEditFeed :: proc(l: ^State) -> string {
 	if (l.in_completion || b == TAB) && completion_callback != nil {
 		r = completeLine(l, r)
 		if r == 0 {
-			return "more"
+			return "more", .None
 		}
 		if r < 0x80 {
 			b = byte(r)
@@ -1008,9 +994,9 @@ linenoiseEditFeed :: proc(l: ^State) -> string {
 			delete(history[len(history) - 1])
 			ordered_remove(&history, len(history) - 1)
 		}
-		return strings.clone_from_bytes(l.buf_ptr[:l.len])
+		return strings.clone_from_bytes(l.buf_ptr[:l.len]), .None
 	case CTRL_C:
-		return "" // TODO: errno EAGAIN
+		return "", .CtrlC
 	case BACKSPACE, 8:
 		linenoiseEditBackspace(l)
 	case CTRL_D:
@@ -1021,7 +1007,7 @@ linenoiseEditFeed :: proc(l: ^State) -> string {
 				delete(history[len(history) - 1])
 				ordered_remove(&history, len(history) - 1)
 			}
-			return "" // EOF
+			return "", .None // EOF
 		}
 	case CTRL_T:
 		if l.pos > 0 && l.pos < l.len {
@@ -1043,12 +1029,12 @@ linenoiseEditFeed :: proc(l: ^State) -> string {
 		linenoiseEditHistoryNext(l, .Next)
 	case ESC:
 		seq: [3]byte
-		if posix.read(posix.FD(l.ifd), &seq[0], 1) == -1 {return "more"}
-		if posix.read(posix.FD(l.ifd), &seq[1], 1) == -1 {return "more"}
+		if posix.read(posix.FD(l.ifd), &seq[0], 1) == -1 {return "more", .None}
+		if posix.read(posix.FD(l.ifd), &seq[1], 1) == -1 {return "more", .None}
 
 		if seq[0] == '[' {
 			if seq[1] >= '0' && seq[1] <= '9' {
-				if posix.read(posix.FD(l.ifd), &seq[2], 1) == -1 {return "more"}
+				if posix.read(posix.FD(l.ifd), &seq[2], 1) == -1 {return "more", .None}
 				if seq[2] == '~' {
 					switch seq[1] {
 					case '3':
@@ -1103,10 +1089,10 @@ linenoiseEditFeed :: proc(l: ^State) -> string {
 		linenoiseEditInsert(l, r)
 	}
 
-	return "more" // Special value to indicate more editing needed
+	return "more", .None // Special value to indicate more editing needed
 }
 
-linenoise :: proc(prompt: string) -> string {
+linenoise :: proc(prompt: string) -> (string, Error) {
 	if !posix.isatty(posix.STDIN_FILENO) {
 		return linenoiseNoTTY()
 	}
@@ -1115,17 +1101,17 @@ linenoise :: proc(prompt: string) -> string {
 	state: State
 
 	if linenoiseEditStart(&state, -1, -1, raw_data(buf[:]), len(buf), prompt) == -1 {
-		return ""
+		return "", .None
 	}
 
 	for {
-		res := linenoiseEditFeed(&state)
-		if res != "more" {
+		res, err := linenoiseEditFeed(&state)
+		if res != "more" || err != .None {
 			linenoiseEditStop(&state)
-			return res
+			return res, err
 		}
 	}
-	return ""
+	return "", .None
 }
 
 // History API

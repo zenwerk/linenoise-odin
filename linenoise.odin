@@ -160,7 +160,9 @@ enableRawMode :: proc(fd: c.int) -> Error {
 }
 
 disableRawMode :: proc(fd: c.int) {
-	if rawmode && posix.tcsetattr(posix.FD(fd), posix.TC_Optional_Action(TCSAFLUSH), &orig_termios) != posix.result(-1) {
+	if rawmode &&
+	   posix.tcsetattr(posix.FD(fd), posix.TC_Optional_Action(TCSAFLUSH), &orig_termios) !=
+		   posix.result(-1) {
 		rawmode = false
 	}
 }
@@ -298,6 +300,14 @@ getByteSliceWidth :: proc(b: []byte) -> int {
 	return getStrWidth(string(b))
 }
 
+// Helper to get UTF-8 rune length from the first byte
+getRuneLen :: proc(b: byte) -> int {
+	if b & 0xE0 == 0xC0 {return 2}
+	if b & 0xF0 == 0xE0 {return 3}
+	if b & 0xF8 == 0xF0 {return 4}
+	return 1
+}
+
 linenoiseBeep :: proc() {
 	posix.write(posix.STDERR_FILENO, raw_data(str_bytes("\x07")), 1)
 }
@@ -364,7 +374,14 @@ abFree :: proc(ab: ^abuf) {
 
 // Line Editing
 
-linenoiseEditStart :: proc(l: ^State, stdin_fd: c.int, stdout_fd: c.int, buf: [^]byte, buflen: int, prompt: string) -> int {
+linenoiseEditStart :: proc(
+	l: ^State,
+	stdin_fd: c.int,
+	stdout_fd: c.int,
+	buf: [^]byte,
+	buflen: int,
+	prompt: string,
+) -> int {
 	l.in_completion = false
 	l.ifd = stdin_fd != -1 ? stdin_fd : c.int(posix.STDIN_FILENO)
 	l.ofd = stdout_fd != -1 ? stdout_fd : c.int(posix.STDOUT_FILENO)
@@ -480,8 +497,7 @@ refreshSingleLine :: proc(l: ^State) {
 			}
 
 			b := buf_slice[offset]
-			rune_len := 1
-			if b & 0xE0 == 0xC0 {rune_len = 2} else if b & 0xF0 == 0xE0 {rune_len = 3} else if b & 0xF8 == 0xF0 {rune_len = 4}
+			rune_len := getRuneLen(b)
 
 			w := 1
 			if rune_len > 1 {
@@ -502,8 +518,7 @@ refreshSingleLine :: proc(l: ^State) {
 
 	for end_byte < l.len {
 		b := buf_slice[end_byte]
-		rune_len := 1
-		if b & 0xE0 == 0xC0 {rune_len = 2} else if b & 0xF0 == 0xE0 {rune_len = 3} else if b & 0xF8 == 0xF0 {rune_len = 4}
+		rune_len := getRuneLen(b)
 
 		w := 1
 		if rune_len > 1 {
@@ -589,8 +604,7 @@ refreshMultiLine :: proc(l: ^State) {
 			abAppend(&ab, "*")
 			// advance offset
 			b := buf_slice[offset]
-			rune_len := 1
-			if b & 0xE0 == 0xC0 {rune_len = 2} else if b & 0xF0 == 0xE0 {rune_len = 3} else if b & 0xF8 == 0xF0 {rune_len = 4}
+			rune_len := getRuneLen(b)
 			offset += rune_len
 		}
 	} else {
@@ -747,7 +761,9 @@ linenoiseEditInsert :: proc(l: ^State, r: rune) -> int {
 			l.buf_ptr[l.len] = 0
 
 			// Optimization for appending at end
-			if !mlmode && l.plen + getByteSliceWidth(l.buf_ptr[:l.len]) < l.cols && hints_callback == nil {
+			if !mlmode &&
+			   l.plen + getByteSliceWidth(l.buf_ptr[:l.len]) < l.cols &&
+			   hints_callback == nil {
 				if maskmode {
 					posix.write(posix.FD(l.ofd), raw_data(str_bytes("*")), 1)
 				} else {
@@ -958,7 +974,13 @@ linenoiseEditFeed :: proc(l: ^State) -> (string, Error) {
 		r = rune(b)
 	} else {
 		len_needed := 0
-		if b & 0xE0 == 0xC0 {len_needed = 1} else if b & 0xF0 == 0xE0 {len_needed = 2} else if b & 0xF8 == 0xF0 {len_needed = 3}
+		if b & 0xE0 == 0xC0 {
+			len_needed = 1
+		} else if b & 0xF0 == 0xE0 {
+			len_needed = 2
+		} else if b & 0xF8 == 0xF0 {
+			len_needed = 3
+		}
 
 		if len_needed > 0 {
 			seq: [4]byte
@@ -1220,3 +1242,4 @@ linenoisePrintKeyCodes :: proc() {
 		fmt.printf("'%c' %02x (%d) (type quit to exit)\n\r", display_char, c_in, c_in)
 	}
 }
+

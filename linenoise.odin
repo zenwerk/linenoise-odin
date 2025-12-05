@@ -961,6 +961,27 @@ linenoiseNoTTY :: proc() -> (string, Error) {
 	return result, .None
 }
 
+linenoiseNoTTY_to_buf :: proc(out: []byte) -> (n: int, err: Error) {
+	idx := 0
+	for idx < len(out) {
+		b: byte
+		nread := posix.read(posix.STDIN_FILENO, &b, 1)
+		if nread <= 0 { 	// EOF or Error
+			if idx == 0 {
+				return 0, .None
+			} else {
+				break
+			}
+		}
+		if b == '\n' {
+			break
+		}
+		out[idx] = b
+		idx += 1
+	}
+	return idx, .None
+}
+
 linenoiseEditFeed :: proc(l: ^State) -> (string, Error) {
 	if !posix.isatty(posix.FD(l.ifd)) {
 		return linenoiseNoTTY()
@@ -1118,26 +1139,32 @@ linenoiseEditFeed :: proc(l: ^State) -> (string, Error) {
 	return "more", .None // Special value to indicate more editing needed
 }
 
-linenoise :: proc(prompt: string) -> (string, Error) {
+linenoise :: proc(prompt: string, out: []byte) -> (n: int, err: Error) {
 	if !posix.isatty(posix.STDIN_FILENO) {
-		return linenoiseNoTTY()
+		return linenoiseNoTTY_to_buf(out)
 	}
 
-	buf: [LINENOISE_MAX_LINE]byte
 	state: State
 
-	if linenoiseEditStart(&state, -1, -1, raw_data(buf[:]), len(buf), prompt) == -1 {
-		return "", .None
+	if linenoiseEditStart(&state, -1, -1, raw_data(out), len(out), prompt) == -1 {
+		return 0, .None
 	}
 
 	for {
-		res, err := linenoiseEditFeed(&state)
-		if res != "more" || err != .None {
+		res, feed_err := linenoiseEditFeed(&state)
+		if res != "more" || feed_err != .None {
 			linenoiseEditStop(&state)
-			return res, err
+			if feed_err != .None {
+				return 0, feed_err
+			}
+			// Copy result to output buffer
+			result_len := min(len(res), len(out))
+			copy(out[:result_len], res)
+			delete(res)
+			return result_len, .None
 		}
 	}
-	return "", .None
+	return 0, .None
 }
 
 // History API

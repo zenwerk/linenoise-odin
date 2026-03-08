@@ -106,7 +106,7 @@ str_bytes :: proc(s: string) -> []byte {
 
 // Helper to check unsupported terminals
 isUnsupportedTerm :: proc() -> bool {
-	term := os.get_env("TERM")
+	term := os.get_env("TERM", context.temp_allocator)
 	if term == "" {
 		return false
 	}
@@ -1207,8 +1207,8 @@ linenoiseHistorySetMaxLen :: proc(l: int) -> int {
 linenoiseHistorySave :: proc(filename: string) -> int {
 	// TODO: umask handling if needed
 
-	f, err := os.open(filename, os.O_WRONLY | os.O_CREATE | os.O_TRUNC, 0o644)
-	if err != 0 {
+	f, err := os.open(filename, os.O_WRONLY + os.O_CREATE + os.O_TRUNC, os.perm_number(0o644))
+	if err != nil {
 		return -1
 	}
 	defer os.close(f)
@@ -1221,8 +1221,8 @@ linenoiseHistorySave :: proc(filename: string) -> int {
 }
 
 linenoiseHistoryLoad :: proc(filename: string) -> int {
-	data, ok := os.read_entire_file(filename)
-	if !ok {
+	data, read_err := os.read_entire_file(filename, context.allocator)
+	if read_err != nil {
 		return -1
 	}
 	defer delete(data)
